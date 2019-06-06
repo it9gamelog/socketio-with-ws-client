@@ -146,8 +146,7 @@ namespace IT9GameLog.SocketIo
                 throw new ObjectDisposedException(GetType().FullName);
             if (oldState != CREATED)
                 throw new InvalidOperationException("Socket is already started");
-
-
+            
             // You might want to add the following before calling connect
             //   if connecting to a modern TLS v1.2 server
             // ServicePointManager.Expect100Continue = true;
@@ -175,10 +174,17 @@ namespace IT9GameLog.SocketIo
             int mark, len = 0;
             using (var client = new HttpClient())
             {
-                var handshake = await client.GetAsync(ub.Uri, cancellationToken);
-                if (!handshake.IsSuccessStatusCode)
-                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake response gives failure");
-                buf = await handshake.Content.ReadAsByteArrayAsync();
+                try
+                {
+                    var handshake = await client.GetAsync(ub.Uri, cancellationToken);
+                    if (!handshake.IsSuccessStatusCode)
+                        throw new WebSocketException(WebSocketError.HeaderError, "Handshake response gave failure response");
+                    buf = await handshake.Content.ReadAsByteArrayAsync();
+                }
+                catch (HttpRequestException)
+                {
+                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake request failed");
+                }
             }
 
             // Response is formatted according to https://github.com/socketio/engine.io-protocol, XHR2 section
