@@ -187,23 +187,46 @@ namespace IT9GameLog.SocketIo
                 }
             }
 
-            // Response is formatted according to https://github.com/socketio/engine.io-protocol, XHR2 section
-            // <0 for string data, 1 for binary data><Any number of numbers between 0 and 9><The number 255><packet1 (first type, then data)>[...]
-            // Example: \x00 \x04 \x00 \x02 \xff 0 "Json Data"
-            //   where the first \x00 indicates string data
-            //   \x04 \x00 \x02 means the following packet is 402 bytes long
-            //   \xff marks the beginning of the packet
-            //   Packet type 0 means "Open" command 
-            if (buf.Length < 2 || buf[0] != 0x00)
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is not a standard engine.io string data");
-
-            mark = Array.IndexOf(buf, (byte)0xff, 0, buf.Length);
-            if (mark < 0)
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is malformed");
-            var lengthSegment = new ArraySegment<byte>(buf, 1, mark - 1);
-            foreach (var i in lengthSegment)
+            // Response is formatted according to https://github.com/socketio/engine.io-protocol
+            if (buf.Length > 2 && buf[0] == 0x00)
             {
-                len = len * 10 + i;
+                // XHR2 section
+                //
+                // <0 for string data, 1 for binary data><Any number of numbers between 0 and 9><The number 255><packet1 (first type, then data)>[...]
+                // Example: \x00 \x04 \x00 \x02 \xff 0 "Json Data"
+                //   where the first \x00 indicates string data
+                //   \x04 \x00 \x02 means the following packet is 402 bytes long
+                //   \xff marks the beginning of the packet
+                //   Packet type 0 means "Open" command 
+                mark = Array.IndexOf(buf, (byte)0xff, 0, buf.Length);
+                if (mark < 0)
+                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is malformed");
+                var lengthSegment = new ArraySegment<byte>(buf, 1, mark - 1);
+                foreach (var i in lengthSegment)
+                {
+                    len = len * 10 + i;
+                }
+            } if (buf.Length > 2 && buf[0] >= '0' && buf[0] <= '9')
+            {
+                // non XHR2 section
+                //
+                // <length in decimal and ascii><ascii ":"><packet1 (first type, then data)>[...]
+                // Example: "96:0Json Data"
+                //   where 96 means length of the packet is 96 bytes
+                //   : is the delimiter
+                //   Packet type 0 means "Open" command 
+
+                mark = Array.IndexOf(buf, (byte)':', 0, buf.Length);
+                if (mark < 0)
+                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is malformed");
+                var lengthSegment = new ArraySegment<byte>(buf, 0, mark);
+                foreach (var i in lengthSegment)
+                {
+                    len = len * 10 + (i-'0');
+                }
+            } else
+            {
+                throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is not a standard engine.io data");
             }
 
             if (mark + len + 1 > buf.Length || len < 1)
@@ -583,7 +606,6 @@ namespace IT9GameLog.SocketIo
                             pingRequestDeadline = Environment.TickCount + (int)PingInterval.TotalMilliseconds;
                             pongTimeoutDeadline = Environment.TickCount + (int)PingTimeout.TotalMilliseconds;
                         }
-
                     }
                     if (Environment.TickCount - pongTimeoutDeadline >= 0)
                     {
