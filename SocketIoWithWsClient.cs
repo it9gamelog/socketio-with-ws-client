@@ -606,6 +606,7 @@ namespace IT9GameLog.SocketIo
                             pingRequestDeadline = Environment.TickCount + (int)PingInterval.TotalMilliseconds;
                             pongTimeoutDeadline = Environment.TickCount + (int)PingTimeout.TotalMilliseconds;
                         }
+                        tPing = null;
                     }
                     if (Environment.TickCount - pongTimeoutDeadline >= 0)
                     {
