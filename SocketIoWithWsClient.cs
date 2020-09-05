@@ -102,6 +102,10 @@ namespace IT9GameLog.SocketIo
         private const int CONNECTED = 2;
         private const int DISPOSED = 3;
 
+        private static byte[] PING_STRING = Encoding.UTF8.GetBytes("2");
+        private static byte[] PONG_STRING = Encoding.UTF8.GetBytes("3");
+
+
         public TimeSpan PingInterval { get; set; }
         public TimeSpan PingTimeout { get; set; }
         public string SessionId { get; private set; }
@@ -157,146 +161,25 @@ namespace IT9GameLog.SocketIo
             if (string.IsNullOrEmpty(uri.LocalPath) || uri.LocalPath == "/")
                 ub.Path = "/socket.io/";
 
-            await ConnectHandshakeAsync(ub, ignorePingSettings, cancellationToken);
-            await ConnectHandshakeFinalize(ub, cancellationToken);
+            //SessionId = "QBOi_q26z89cS9qgAAq-";
+            // await ConnectHandshakeAsync(ub, ignorePingSettings, cancellationToken);
+
+            await ConnectV4Async(ub, ignorePingSettings, cancellationToken);
+
+            Trace.WriteLine("Session ID: " + SessionId);
+            // await ConnectHandshakeFinalize(ub, cancellationToken);
 
             if (Interlocked.CompareExchange(ref state, CONNECTED, CONNECTING) != CONNECTING)
                 throw new ObjectDisposedException(GetType().FullName);
         }
 
-        private async Task ConnectHandshakeAsync(UriBuilder ub, bool ignorePingSettings, CancellationToken cancellationToken)
+        private async Task ConnectV4Async(UriBuilder ub, bool ignorePingSettings, CancellationToken cancellationToken)
         {
-            // Initiate a Engine IO v3, polling connection
-            ub.Query = "EIO=3&transport=polling&t=" + RandomString(10) + 
+            // engine.io specification: https://github.com/socketio/engine.io-protocol
+            // Initiate a Engine IO v4, polling connection
+            ub.Query = "EIO=4&transport=websocket" +
                 (!string.IsNullOrEmpty(ub.Query) && ub.Query.StartsWith("?") ? "&" + ub.Query.Substring(1) : string.Empty);
-            
-            byte[] buf;
-            int mark, len = 0;
-            using (var client = new HttpClient())
-            {
-                try
-                {
-                    var handshake = await client.GetAsync(ub.Uri, cancellationToken);
-                    if (!handshake.IsSuccessStatusCode)
-                        throw new WebSocketException(WebSocketError.HeaderError, "Handshake response gave failure response");
-                    buf = await handshake.Content.ReadAsByteArrayAsync();
-                }
-                catch (HttpRequestException)
-                {
-                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake request failed");
-                }
-            }
 
-            // Response is formatted according to https://github.com/socketio/engine.io-protocol
-            if (buf.Length > 2 && buf[0] == 0x00)
-            {
-                // XHR2 section
-                //
-                // <0 for string data, 1 for binary data><Any number of numbers between 0 and 9><The number 255><packet1 (first type, then data)>[...]
-                // Example: \x00 \x04 \x00 \x02 \xff 0 "Json Data"
-                //   where the first \x00 indicates string data
-                //   \x04 \x00 \x02 means the following packet is 402 bytes long
-                //   \xff marks the beginning of the packet
-                //   Packet type 0 means "Open" command 
-                mark = Array.IndexOf(buf, (byte)0xff, 0, buf.Length);
-                if (mark < 0)
-                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is malformed");
-                var lengthSegment = new ArraySegment<byte>(buf, 1, mark - 1);
-                foreach (var i in lengthSegment)
-                {
-                    len = len * 10 + i;
-                }
-            } if (buf.Length > 2 && buf[0] >= '0' && buf[0] <= '9')
-            {
-                // non XHR2 section
-                //
-                // <length in decimal and ascii><ascii ":"><packet1 (first type, then data)>[...]
-                // Example: "96:0Json Data"
-                //   where 96 means length of the packet is 96 bytes
-                //   : is the delimiter
-                //   Packet type 0 means "Open" command 
-
-                mark = Array.IndexOf(buf, (byte)':', 0, buf.Length);
-                if (mark < 0)
-                    throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is malformed");
-                var lengthSegment = new ArraySegment<byte>(buf, 0, mark);
-                foreach (var i in lengthSegment)
-                {
-                    len = len * 10 + (i-'0');
-                }
-            } else
-            {
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake response is not a standard engine.io data");
-            }
-
-            if (mark + len + 1 > buf.Length || len < 1)
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake length should not be longer than the data received");
-            if (len < 1)
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake length is too short");
-            if (buf[mark + 1] != '0')
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake should be an OPEN message");
-
-            string responseText;
-            try
-            {
-                responseText = Encoding.UTF8.GetString(buf, mark + 2, len - 1);
-            }
-            catch (ArgumentException ex)
-            {
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake message should be UTF-8 valid", ex);
-            }
-            JObject responseJson;
-            try
-            {
-                responseJson = JObject.Parse(responseText);
-            }
-            catch (JsonReaderException ex)
-            {
-                throw new WebSocketException(WebSocketError.HeaderError, "Handshake message should be an JSON", ex);
-            }
-
-            try
-            {
-                /* open message: https://github.com/socketio/engine.io-protocol
-                    { "sid": "RANDOM", "upgrades": ["websocket"], "pingInterval": 1000, "pingTimeout": 2000 }                    
-                */
-                SessionId = (string)responseJson.SelectToken("sid");
-                if (string.IsNullOrWhiteSpace(SessionId))
-                    throw new WebSocketException(WebSocketError.HeaderError, "Failed to extract sid in handshake");
-                if (!ignorePingSettings)
-                {
-                    var tPingInterval = responseJson.SelectToken("pingInterval");
-                    if (tPingInterval != null)
-                        PingInterval = TimeSpan.FromMilliseconds((int)tPingInterval);
-                    var tPingTimeout = responseJson.SelectToken("pingTimeout");
-                    if (tPingTimeout != null)
-                        PingTimeout = TimeSpan.FromMilliseconds((int)tPingTimeout);
-                }
-                var tUpgrades = responseJson["upgrades"];
-                if (!(tUpgrades is JArray))
-                    throw new WebSocketException(WebSocketError.HeaderError, "Failed to extract upgrades in handshake");
-                bool found = false;
-                foreach (var e in tUpgrades)
-                {
-                    if ((string)e == "websocket")
-                        found = true;
-                }
-                if (!found)
-                    throw new WebSocketException(WebSocketError.UnsupportedVersion,
-                        "Handshake said WebSocket protocol is not supported, yet we don't support other protocol");
-            }
-            catch (FormatException ex)
-            {
-                throw new WebSocketException(WebSocketError.HeaderError, "Failed to parse handshake message", ex);
-            }
-        }
-
-        private async Task ConnectHandshakeFinalize(UriBuilder ub, CancellationToken cancellationToken)
-        {
-            // The following exchanges follows the Encoding/example in
-            // https://github.com/socketio/engine.io-protocol/blob/master/README.md
-
-            ub.Query = "EIO=3&transport=websocket&sid=" + SessionId;
             ub.Scheme = ub.Scheme == "https" ? "wss" : "ws";
 
             // Connect with standard WebSocket
@@ -309,22 +192,11 @@ namespace IT9GameLog.SocketIo
             {
                 throw new WebSocketException("Failed to connect the websocket", ex);
             }
-            
-            // Send "2probe"
+
             var buffer = new byte[512];
             var bufferSegment = new ArraySegment<byte>(buffer);
-            try
-            {
-                // engine.io<Ping(2)>
-                await innerWebSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("2probe")),
-                    WebSocketMessageType.Text, true, cancellationToken);
-            }
-            catch (WebSocketException ex)
-            {
-                throw new WebSocketException("Failed to send probe", ex);
-            }
-            
-            // Get "3probe"
+            // Get Handshake
+            // "0{"sid":"lv_VI97HAXpY6yYWAAAC","pingInterval":25000,"pingTimeout":5000}"
             WebSocketReceiveResult r;
             try
             {
@@ -332,76 +204,48 @@ namespace IT9GameLog.SocketIo
             }
             catch (WebSocketException ex)
             {
-                throw new WebSocketException("Failed to receive probe or send upgrade command", ex);
+                throw new WebSocketException("Failed to receive handshake", ex);
             }
             do
             {
                 if (r.MessageType == WebSocketMessageType.Text)
                 {
                     var t = Encoding.UTF8.GetString(bufferSegment.Array, bufferSegment.Offset, r.Count);
-                    if (t.StartsWith("3")) // Server should send "3probe", yet anything starts with "3" is ok
+                    if (t.StartsWith("0"))
                     {
-                        // Got engine.io<Pong(3)>
-                        // Sending engine.io<Upgrade(5)>
-                        await innerWebSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("5")),
-                            WebSocketMessageType.Text, true, cancellationToken);
+                        JObject responseJson;
+                        try
+                        {
+                            responseJson = JObject.Parse(t.Substring(1));
+                        }
+                        catch (JsonReaderException ex)
+                        {
+                            throw new WebSocketException(WebSocketError.HeaderError, "Handshake message should be an JSON", ex);
+                        }
+
+                        SessionId = (string)responseJson.SelectToken("sid");
+                        if (string.IsNullOrWhiteSpace(SessionId))
+                            throw new WebSocketException(WebSocketError.HeaderError, "Failed to extract sid in handshake");
+                        if (!ignorePingSettings)
+                        {
+                            var tPingInterval = responseJson.SelectToken("pingInterval");
+                            if (tPingInterval != null)
+                                PingInterval = TimeSpan.FromMilliseconds((int)tPingInterval);
+                            var tPingTimeout = responseJson.SelectToken("pingTimeout");
+                            if (tPingTimeout != null)
+                                PingTimeout = TimeSpan.FromMilliseconds((int)tPingTimeout);
+                        }
                         break;
                     }
                 }
-                throw new WebSocketException(WebSocketError.Faulted, "Probe expected but received something else");
-            } while (false);
-
-            // Fetch server responses to 5
-            try
-            {
-                r = await innerWebSocket.ReceiveAsync(bufferSegment, CancellationToken.None);
-            }
-            catch (WebSocketException ex)
-            {
-                throw new WebSocketException("Failed to receive Message+Connect response", ex);
-            }
-            do
-            {
-                if (r.MessageType == WebSocketMessageType.Text)
-                {
-                    var t = Encoding.UTF8.GetString(bufferSegment.Array, bufferSegment.Offset, r.Count);
-                    if (t.StartsWith("40")) // Server should send "40" yet anything starts with it is ok. 
-                    {
-                        // engine.io<Message(4)> + socket.io<Connect(0)>
-                        // OK!
-                        break;
-                    }
-                    else if (t.StartsWith("44") && t.Length >= 2)
-                    {
-                        // engine.io<Message(4)> + socket.io<Error(4)>
-                        //
-                        // If there is any application level error, 
-                        // such as unauthorized access, invalid parameters
-                        // socket.io will usually report the error only at this stage
-                        throw new WebSocketException(WebSocketError.Faulted, "Fail to connect: " + t.Substring(2));
-
-                    }
-                    else if (t.StartsWith("41"))
-                    {
-                        // engine.io<Message(4)> + socket.io<Disconnect(1)>
-                        throw new WebSocketException(WebSocketError.Faulted, "Server refuse to connect: " + t.Substring(2));
-
-                    }
-                    else if (t.StartsWith("4"))
-                    {
-                        // engine.io<Message(4)> + anything else
-                        throw new WebSocketException(WebSocketError.Faulted, "Fail to connect: " + t);
-                    }
-                }
-                throw new WebSocketException(WebSocketError.Faulted, "Message(4)+Connect(0) expected but received something else");
+                throw new WebSocketException(WebSocketError.Faulted, "Handshake expected but received something else");
             } while (false);
 
             // Starting the loop
             new Thread(ReceiverLoop).Start(cancellationToken);
             new Thread(SenderLoop).Start(cancellationToken);
         }
-
-
+        
         /// <summary>
         /// Send a SocketIo EVENT
         /// </summary>
@@ -481,7 +325,7 @@ namespace IT9GameLog.SocketIo
                     if (Interlocked.Exchange(ref pingRequest, 0) == 1)
                     {
                         pingRequestAt = Environment.TickCount;
-                        await innerWebSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("2")),
+                        await innerWebSocket.SendAsync(new ArraySegment<byte>(PING_STRING),
                             WebSocketMessageType.Text, true, CancellationToken.None);
                     }
 
@@ -492,7 +336,7 @@ namespace IT9GameLog.SocketIo
                     if (Interlocked.Exchange(ref pingRequest, 0) == 1)
                     {
                         pingRequestAt = Environment.TickCount;
-                        await innerWebSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes("2")),
+                        await innerWebSocket.SendAsync(new ArraySegment<byte>(PING_STRING),
                             WebSocketMessageType.Text, true, CancellationToken.None);
                     }
                 }
@@ -556,6 +400,11 @@ namespace IT9GameLog.SocketIo
                                 // Defalut engine.io protocol
                                 switch (buffer[0])
                                 {
+                                    case (byte)'2': // Server Ping
+                                        await innerWebSocket.SendAsync(new ArraySegment<byte>(PONG_STRING),
+                                            WebSocketMessageType.Text, true, CancellationToken.None);
+                                        break;
+
                                     case (byte)'3': // Server Pong
                                         pongTimeoutDeadline = Environment.TickCount + (int)PingTimeout.TotalMilliseconds;
                                         Ping?.Invoke(this, new PingEventArgs(pingRequestAt, Environment.TickCount));
