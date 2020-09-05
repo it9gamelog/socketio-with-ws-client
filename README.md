@@ -3,6 +3,8 @@ Name
 
 socketio-with-ws-client - A simplified, bare minimum C# socket.io client implementation
 
+This version only support Engine IO v4 and websocket mode. For Engine IO v3, please checkout the "eio3" release.
+
 Synopsis
 ========
 
